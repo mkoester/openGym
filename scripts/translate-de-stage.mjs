@@ -152,7 +152,17 @@ ${JSON.stringify(input)}`
 }
 
 if (!apply) {
-  console.log(`Validated ${pending.length} translations. Re-run with --apply to update ${sourcePath}.`)
+  // A dry run exists to be read: a bare count leaves nothing to judge a new model or a changed
+  // prompt by, which is the whole reason for running without --apply. Print English beside German
+  // so the glossary and the meaning can both be checked in one pass.
+  for (const exercise of pending) {
+    console.log(`\n${exercise.id} — ${exercise.n}`)
+    exercise.st.forEach((english, index) => {
+      console.log(`  EN  ${english}`)
+      console.log(`  DE  ${next[exercise.id][index]}`)
+    })
+  }
+  console.log(`\nValidated ${pending.length} translations. Re-run with --apply to update ${sourcePath}.`)
   process.exit(0)
 }
 

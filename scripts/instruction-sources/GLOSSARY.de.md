@@ -50,6 +50,7 @@ Use standard German **ß** (`Gesäß`, `Fuß`, `schließen`), not the Swiss `ss`
 | attach (equipment) | befestige | fixier |
 | position (a body part) | the concrete verb: leg, bring, setz, stell | positioniere |
 | adjust / set an angle | stell … ein | positionier |
+| on all fours | Vierfüßlerstand | auf allen vieren |
 | shoulder-width | schulterbreit | schulterweit |
 | barbell | Langhantel | Stange (on its own) |
 | dumbbell | Kurzhantel | Hantel (ambiguous — could be either) |

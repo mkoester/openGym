@@ -149,6 +149,7 @@ Rules:
 - Use the SHORT imperative without -e: "Leg dich flach auf den Rücken", not "Lege dich". Likewise heb, senk, streck, spann, beug, halt, zieh, drück, kehr, wiederhol, greif, steh, führ, häng. This list is not exhaustive: use the short form for every verb, except where the -e is required (below) or where the glossary names the long form explicitly, as it does for "befestige".
 - Translate the verb "press" as drück, never press or presse. Render "pause" as "halt … inne", or as "warte" where the step really means waiting; never "pausier".
 - Translate "secure" (a body part) as "fixier", never "befestige" — befestigen is for equipment ("attach"). Never write the reflexive "lass dir … fixieren"; name the agent or use the plain imperative.
+- Translate "on all fours" as "Vierfüßlerstand", not "auf allen vieren".
 - Do not use "positionieren". For "position your <body part>" use the concrete verb the movement uses (leg, bring, setz, stell); for a machine setting or an angle use "stell … ein".
 - Keep the -e only where German requires it: atme ein/aus, öffne, warte, wechsle.
 - Follow the glossary. In particular, translate "engage your core/abs" as "spann die Körpermitte an", never "aktiviere den Core" and never "spann die Bauchmuskeln an".

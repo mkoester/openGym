@@ -124,6 +124,12 @@ export const termRules = [
     test: german => !/fixier/iu.test(german)
   },
   {
+    name: 'all-fours',
+    fix: 'Translate "on all fours" as "Vierfüßlerstand" — e.g. "geh in den Vierfüßlerstand".',
+    appliesTo: english => /\ball fours\b/iu.test(english),
+    test: german => !/Vierfüßlerstand/u.test(german)
+  },
+  {
     name: 'closing-phrase',
     fix: 'End with the pinned phrase "die gewünschte Anzahl an Wiederholungen".',
     appliesTo: english => /desired number of repetitions/iu.test(english),

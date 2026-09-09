@@ -28,18 +28,23 @@ git checkout local/de-workflow
 `local/de-workflow` is the branch to work on: it is `i18n/de-instructions` plus this file
 and the ollama provider. Everything below assumes you are on it.
 
-**First batch: translate the four exercises that already exist**, rather than a fresh
-stage:
+**First batch: one exercise, to prove the plumbing** before spending anything on a stage:
 
 ```sh
-node scripts/translate-de-stage.mjs --provider=ollama --model=<yours> \
-  --body-part=waist --limit=4 --batch-size=4
+node scripts/translate-de-stage.mjs --provider=ollama --model=gemma4:12b-it-q8_0 \
+  --body-part=waist --limit=1 --batch-size=1
 ```
 
-Without `--apply` this writes nothing, so the existing four stay put and you can compare
-the local model's output against them — they were produced by a hosted model and pass
-every gate. That is a direct quality read on your model before it touches 1,320 more.
-If it cannot hold the glossary on four exercises, a bigger `--limit` will not help.
+Without `--apply` this writes nothing. A healthy run prints `N tokens in Ns` with **no**
+"chars of thinking", then German. One exercise should land near 200 tokens; thousands means
+the model is reasoning instead of answering (see the correction loop, below).
+
+⚠ **This translates the next *untranslated* exercise, not one you already have.** `pending`
+filters on `!translations[id]`, so a dry run can never re-translate what `de.json` holds.
+To compare a model against the curated entries, give it a `de.json` that does not contain
+them — a throwaway `git worktree` with `de.json` emptied is the safe way, since emptying the
+real file leaves it mangled if the run is interrupted. Do not reach for `git checkout` to
+repair that; it discards whatever else is uncommitted.
 
 ## Where the output goes, and how it gets back
 
@@ -81,6 +86,20 @@ environment does not install the real one over it. Every test touching storage t
 fnm install 22 && fnm use 22    # or nvm, or whatever manages node versions there
 ```
 
+Node 22 is needed for **vitest only**. `translate-de-stage.mjs` imports nothing but node
+builtins, so it runs happily on whatever node the machine has.
+
+Two things that bit on a fresh checkout, both of which look like broken tooling:
+
+- **`npm ci` may fail building `sharp`** with `ENOENT … mkdir '/home/mk/.cache/node-gyp'`.
+  sharp finds a globally-installed libvips and tries a source build; the cache directory
+  it wants does not exist and `$HOME` is not writable from a sandbox. `mkdir ~/.cache/node-gyp`
+  once fixes it permanently, or `SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm ci` sidesteps the source
+  build entirely — which is what CI does anyway, `node:22-alpine` having no global libvips.
+- **`~/.npm` may not exist**, and an allowed-but-absent path behaves exactly like a denied
+  one: `npm ci` dies with `ENOENT … mkdir '/home/mk/.npm'`. `mkdir ~/.npm` once, or pass
+  `npm ci --cache <writable-dir>`.
+
 ## The corpus
 
 1,324 exercises, 7,710 steps. Stages follow the dataset's `body_part`, same split the
@@ -117,11 +136,29 @@ node scripts/build-de-instructions.mjs
 cd frontend && npm test
 ```
 
+### The correction loop
+
+Each batch is checked against the language rules in `scripts/de-rules.mjs` — the same file
+`de-instructions.test.js` enforces — *before* it is written. A batch that breaks a rule is
+sent back to the model quoting only the offending steps and the specific fix, up to
+`--max-retries` times (default 2). A batch that still fails is never written; the stage
+stops and names the steps and rules.
+
+That is worth understanding before tuning anything, because it changes what makes a model
+good here: not "makes fewer mistakes" but **"can fix a mistake when told exactly what is
+wrong"**. Measured on 8 exercises, 5 batches needed exactly one correction and all five
+stuck, leaving 43 steps with zero violations.
+
+The corrections are only as good as their wording. A generic *"use the short imperative"*
+was ignored three times running by a model that had written `Setze dich`; naming the word
+— *write "setz", not "setze"* — fixed it first try. When you add a rule, write its `fix`
+as an instruction that quotes the offending text.
+
 ### With a local model
 
 ```sh
 OLLAMA_HOST=http://your-gpu-box:11434 \
-  node scripts/translate-de-stage.mjs --provider=ollama --model=qwen3:14b \
+  node scripts/translate-de-stage.mjs --provider=ollama --model=gemma4:12b-it-q8_0 \
   --body-part=waist --limit=20 --batch-size=5 --apply
 ```
 
@@ -129,8 +166,24 @@ OLLAMA_HOST=http://your-gpu-box:11434 \
 local daemon needs no configuration. Requests run at `temperature: 0` — the same batch
 retranslated should give the same text.
 
-Four things worth knowing before the first run:
+**`gemma4:12b-it-q8_0` is the current choice** (on a 16 GB RX 6800). It was compared
+head-to-head with `gemma4:12b-it-qat`, which is roughly 1.5× faster and 5 GB smaller: qat
+lost because it could not always *act* on a correction — it failed to remove an
+untranslated English `Lie` in three attempts where q8 removed it in one. Speed does not
+help when an uncorrectable batch stops the stage. The `--model` default in the script
+(`qwen3:14b`) is a leftover from the pt-BR script and is not installed here; always pass
+`--model` explicitly.
 
+Five things worth knowing before the first run:
+
+- **Thinking must be off, and the script sends `think: false`.** Left on, gemma4 puts its
+  answer in `message.thinking` and leaves `message.content` empty — 11,234 tokens over
+  8½ minutes, then a failure that reads as if the model returned nothing. If a model
+  ignores the flag, the error now says so and quotes the thinking.
+- **Requests are streamed even though one complete answer is wanted.** With `stream: false`
+  ollama sends no response headers until generation finishes, and node's fetch gives up
+  after 300 s — so any batch slower than five minutes died as `UND_ERR_HEADERS_TIMEOUT`
+  with nothing to show. Streaming makes the headers arrive immediately.
 - **The model must support structured outputs.** Ollama compiles the JSON schema into a
   grammar; a model that cannot follow it returns prose and the script fails with
   `Ollama returned unparseable JSON`, quoting the first 400 characters.
@@ -149,21 +202,32 @@ Four things worth knowing before the first run:
 
 ### What the automated gates catch
 
-`frontend/src/lib/de-instructions.test.js` and `build-de-instructions.mjs` between them
-reject:
+The rules live in **`scripts/de-rules.mjs`**, and both the translator and
+`de-instructions.test.js` import them — the translator to correct a batch as it runs, the
+test to fail the build. Add a rule there and it takes effect in both places at once; that
+is the whole reason the file exists, since two copies of a regex is one rule that drifts.
+`build-de-instructions.mjs` additionally rejects unknown IDs, empty steps and step counts
+that differ from the English. Between them they reject:
 
-- unknown exercise IDs, empty steps, and any step count that differs from the English
-- a step left in English, or containing English function words
+- a step left in English, or containing an English word with no German homograph
 - the polite `Sie` form, and `Ihre`/`Ihren`/`Ihrem`/`Ihrer`/`Ihnen`
-- long-form imperatives (`Lege`, `Halte`, `Hebe` …) where the short form belongs
+- long-form imperatives (`Lege`, `Halte`, `Hänge` …) where the short form belongs
 - wrong strong-verb forms (`nehme`, `gebe`, `trete`, `hält` …)
 - anglicisms the glossary replaces: `Core`, `Glutes`, `Hamstrings`, `Reps`, `Sets`
 - Swiss orthography (`Füsse`, `Gesäss`, `aussen` …)
-- `Ellbogen` instead of `Ellenbogen`
+- `Ellbogen` instead of `Ellenbogen`, and `positionieren` in any form
 - glossary drift on the terms that carry the most weight: `Körpermitte`, `Langhantel`,
-  `Kurzhantel`, `Kettlebell`, `Multipresse`
+  `Kurzhantel`, `Kettlebell`, `Multipresse`, `Ellenbogen`
+- verb choices the glossary pins: `press` → `drück`, `secure` → `fixier` (never
+  `befestige`, which is for `attach`)
 - the closing phrase: any step whose English says "desired number of repetitions" must
   say `die gewünschte Anzahl an Wiederholungen`
+
+**A rule list only catches what someone already thought of.** Three separate enumerations
+in this pipeline were found incomplete by reading a sample — the imperative list missed
+`hänge`, the English-leak list missed `lie` (15% of sampled steps opened with an
+untranslated "Lie", and both the builder and the test passed them), and the verb-choice
+rules had no entry for `secure`. Assume the current list is likewise incomplete.
 
 ### What no test can catch — and therefore needs a person
 
@@ -173,12 +237,45 @@ reject:
   The glossary says to add one only where the exercise makes it unambiguous; whether that
   judgement was made correctly is only visible to a reader.
 - **Register.** Whether the German reads like a coach or like a manual.
+- **Agreement and case.** Both models tested wrote *„zum rechten Fersen"* for *to your right
+  heel*; `Ferse` is feminine, so it is *„zur rechten Ferse"*. Nothing flags it.
+
+Real examples of each, from one 8-exercise sample that passed every gate: `Schulterblätter`
+written where the English said `shoulders`; the clause *"curling forward"* silently dropped;
+and the case error above. Rule-clean is not the same as correct.
 
 So each stage needs a sample read by a German speaker:
 
 ```sh
 node scripts/de-review-sample.mjs --count=15          # random sample, English vs German
 node scripts/de-review-sample.mjs --body-part=waist   # restricted to one stage
+```
+
+## The working loop
+
+Translating the whole corpus in one pass would bake in every unnoticed habit 7,710 times.
+Work in **micro-batches instead, and convert each manual correction into a rule**:
+
+1. Translate 8–10 exercises with `--batch-size=1` and no `--apply`.
+2. Read the output against `GLOSSARY.de.md`.
+3. Encode whatever you had to correct as a rule in `de-rules.mjs` — plus its glossary entry
+   and, if it is a term choice, a line in the prompt.
+4. Repeat.
+
+Each round's rules then apply to all 1,324 exercises for free, and the correction loop
+enforces them without a human in the way. One 8-exercise round produced five new rules
+(`häng`, `press`→`drück`, `secure`→`fixier`, no `positionieren`, and the English-leak
+expansion). Early rounds have high yield; it tapers as the vocabulary is covered.
+
+**Vary the body part between rounds.** The equipment vocabulary differs sharply — `chest`
+and `back` bring bench angles, cable attachments and grip variants that `waist` never
+exercises, and the glossary is thinnest exactly where it has not been tested.
+
+`--ids` samples a particular English verb in context, which selecting by body part cannot:
+
+```sh
+node scripts/translate-de-stage.mjs --provider=ollama --model=gemma4:12b-it-q8_0 \
+  --ids=1512,0007,2355,0009,1431,1314,0970,1408 --batch-size=1
 ```
 
 ## Finishing

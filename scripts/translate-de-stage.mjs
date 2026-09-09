@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Translates a stage of English exercise instructions into German, in schema-validated,
-// checkpointed batches. Mirrors translate-pt-br-stage.mjs; see instruction-sources/README.md.
+// checkpointed batches. Mirrors translate-pt-br-stage.mjs; see instruction-sources/README.de.md.
 //
 //   node scripts/translate-de-stage.mjs --body-part=waist [--limit=10] [--batch-size=10] [--apply]
 //
@@ -20,6 +20,10 @@ const glossaryPath = join(root, 'scripts', 'instruction-sources', 'GLOSSARY.de.m
 const exercisesPath = join(root, 'frontend', 'src', 'lib', 'exercises-data.js')
 const claude = process.env.CLAUDE_BIN || 'claude'
 const codex = process.env.CODEX_BIN || 'codex'
+// Ollama runs the same schema-constrained workflow against a local model, which is the cheap
+// way to translate a 1,324-exercise corpus. OLLAMA_HOST is ollama's own variable, so a remote
+// GPU box needs no flag here: OLLAMA_HOST=http://gpu-box:11434 node scripts/translate-de-stage.mjs …
+const ollamaHost = (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').replace(/\/$/, '')
 const stageOrder = ['waist', 'chest', 'back', 'shoulders', 'upper arms', 'lower arms', 'upper legs', 'lower legs', 'cardio', 'neck']
 
 const option = name => process.argv.find(arg => arg.startsWith(`--${name}=`))?.split('=').slice(1).join('=')
@@ -36,10 +40,11 @@ const batchSize = Number(option('batch-size') || 10)
 const maxRetries = Number(option('max-retries') ?? 2)
 const apply = process.argv.includes('--apply')
 
-if (!bodyPart && !ids) throw new Error('Usage: translate-de-stage.mjs (--body-part=waist|all | --ids=0001,2355) [--limit=10] [--batch-size=10] [--max-retries=2] [--provider=claude|codex] [--model=NAME] [--apply]')
+if (!bodyPart && !ids) throw new Error('Usage: translate-de-stage.mjs (--body-part=waist|all | --ids=0001,2355) [--limit=10] [--batch-size=10] [--max-retries=2] [--provider=claude|codex|ollama] [--model=NAME] [--apply]')
 if (bodyPart && ids) throw new Error('Pass --body-part or --ids, not both')
-if (!['claude', 'codex'].includes(provider)) throw new Error('provider must be claude or codex')
-const model = option('model') || (provider === 'claude' ? 'sonnet' : '')
+if (!['claude', 'codex', 'ollama'].includes(provider)) throw new Error('provider must be claude, codex or ollama')
+const model = option('model') || (provider === 'claude' ? 'sonnet' : provider === 'ollama' ? 'qwen3:14b' : '')
+if (provider === 'ollama' && !option('model')) console.log(`No --model given, using ${model}`)
 if (!Number.isInteger(limit) || limit < 1 || !Number.isInteger(batchSize) || batchSize < 1) {
   throw new Error('limit and batch-size must be positive integers')
 }
@@ -100,7 +105,7 @@ const requestStructured = async (prompt, batch) => {
     const envelope = JSON.parse(result.stdout)
     if (envelope.is_error || !envelope.structured_output) throw new Error(envelope.result || 'Claude returned no structured output')
     structured = envelope.structured_output
-  } else {
+  } else if (provider === 'codex') {
     const temp = mkdtempSync(join(tmpdir(), 'opengym-de-'))
     const schemaPath = join(temp, 'schema.json')
     const outputPath = join(temp, 'output.json')
@@ -133,7 +138,87 @@ const requestStructured = async (prompt, batch) => {
     } finally {
       rmSync(temp, { recursive: true, force: true })
     }
+  } else {
+    // Ollama. Deliberately the flat schema the codex path uses rather than the oneOf/const one
+    // above: ollama compiles the schema to a GGML grammar, and small local models handle a plain
+    // array of objects far more reliably than a union of per-ID constants. Nothing is lost —
+    // every returned ID and step count is validated below regardless of provider.
+    const ollamaSchema = {
+      type: 'object',
+      properties: {
+        translations: {
+          type: 'array', minItems: batch.length, maxItems: batch.length,
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              steps: { type: 'array', items: { type: 'string' } }
+            },
+            required: ['id', 'steps'], additionalProperties: false
+          }
+        }
+      },
+      required: ['translations'], additionalProperties: false
+    }
+    const started = Date.now()
+    const res = await fetch(`${ollamaHost}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        // Streamed on purpose, though we want one complete answer. With stream:false ollama
+        // sends no response headers until generation has finished, and node's fetch (undici)
+        // gives up waiting for headers after 300 s — so any batch a local model takes longer
+        // than five minutes over dies as UND_ERR_HEADERS_TIMEOUT, with nothing to show for it.
+        // Streaming makes the headers arrive at once and keeps bytes flowing.
+        stream: true,
+        format: ollamaSchema,
+        // No reasoning wanted: the answer is a schema-constrained translation, and on a thinking
+        // model the reasoning goes to message.thinking while message.content stays empty — so a
+        // batch burns thousands of tokens and then fails as if the model had returned nothing.
+        think: false,
+        // Deterministic: a translation corpus should not change between reruns of the same batch.
+        options: { temperature: 0, num_ctx: 16384 }
+      })
+    })
+    if (!res.ok) throw new Error(`Ollama ${res.status}: ${await res.text()}`)
+    let content = ''
+    let thinking = ''
+    let frames = 0
+    let buffer = ''
+    const consume = line => {
+      if (!line.trim()) return
+      const frame = JSON.parse(line)
+      if (frame.error) throw new Error(`Ollama: ${frame.error}`)
+      content += frame.message?.content ?? ''
+      thinking += frame.message?.thinking ?? ''
+      frames += 1
+    }
+    for await (const chunk of res.body) {
+      // A chunk can split an NDJSON line, so the trailing fragment is carried to the next one.
+      buffer += Buffer.from(chunk).toString('utf8')
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      lines.forEach(consume)
+    }
+    consume(buffer)
+    // Worth printing: token count and elapsed time are the only visible signs of a batch going
+    // wrong, since a model that reasons instead of answering still streams happily for minutes.
+    const spent = `${frames} tokens in ${Math.round((Date.now() - started) / 1000)}s`
+    console.log(thinking ? `  ${spent} (${thinking.length} chars of thinking)` : `  ${spent}`)
+    if (!content) {
+      throw new Error(thinking
+        ? `Ollama returned ${thinking.length} characters of thinking and no content, despite think:false — this model may not honour it. First 200: ${thinking.slice(0, 200)}`
+        : 'Ollama returned no message content')
+    }
+    try {
+      structured = JSON.parse(content)
+    } catch {
+      throw new Error(`Ollama returned unparseable JSON: ${String(content).slice(0, 400)}`)
+    }
   }
+
   return structured
 }
 

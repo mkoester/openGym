@@ -16,6 +16,53 @@ from the upstream dataset (hasaneyldrm/exercises-dataset), and that dataset ship
 `instruction_steps` for `en, es, fr, hi, it, ko, pl, ru, tr, zh` — verified across all
 1,324 entries, there is no `de` field to build from.
 
+## Starting from nothing, on another machine
+
+```sh
+git clone git@gitlab.com:MirkoMachine/opengym.git
+cd opengym
+git remote add upstream https://gitlab.com/DuarteSantos8/opengym.git
+git checkout local/de-workflow
+```
+
+`local/de-workflow` is the branch to work on: it is `i18n/de-instructions` plus this file
+and the ollama provider. Everything below assumes you are on it.
+
+**First batch: translate the four exercises that already exist**, rather than a fresh
+stage:
+
+```sh
+node scripts/translate-de-stage.mjs --provider=ollama --model=<yours> \
+  --body-part=waist --limit=4 --batch-size=4
+```
+
+Without `--apply` this writes nothing, so the existing four stay put and you can compare
+the local model's output against them — they were produced by a hosted model and pass
+every gate. That is a direct quality read on your model before it touches 1,320 more.
+If it cannot hold the glossary on four exercises, a bigger `--limit` will not help.
+
+## Where the output goes, and how it gets back
+
+Translations accumulate in `scripts/instruction-sources/de.json`. Commit them **on
+`local/de-workflow`** as you go — one commit per stage, so a bad stage can be dropped
+without losing the others.
+
+They belong upstream, though, and this branch must never be merged there. Port them over
+by taking the file, not the commit:
+
+```sh
+git checkout i18n/de-instructions
+git checkout local/de-workflow -- scripts/instruction-sources/de.json
+node scripts/build-de-instructions.mjs        # regenerate the pack from it
+cd frontend && npm test                        # gates must pass here too
+git add scripts/instruction-sources/de.json frontend/src/instr/de.js
+git commit -m "i18n(de): <stage name> — <n> exercises"
+```
+
+`de.json` is the only file that needs to travel; `frontend/src/instr/de.js` is generated
+from it and must be rebuilt on the target branch rather than copied, or the two can drift
+apart without anything failing.
+
 ## Prerequisites
 
 ```sh
